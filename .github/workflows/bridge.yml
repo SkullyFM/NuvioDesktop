@@ -15,10 +15,14 @@ jobs:
           java-version: '17'
       - name: Get WebView2 SDK
         shell: pwsh
-        run: nuget install Microsoft.Web.WebView2 -OutputDirectory "$env:USERPROFILE\.nuget\packages\microsoft.web.webview2" -ExcludeVersion:$false
+        run: |
+          nuget install Microsoft.Web.WebView2 -OutputDirectory "$env:RUNNER_TEMP\wv2" -NonInteractive
+          $pkg = Get-ChildItem "$env:RUNNER_TEMP\wv2" -Directory |
+                 Where-Object Name -like 'Microsoft.Web.WebView2.*' | Select-Object -First 1
+          "WV2_DIR=$($pkg.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
       - name: Build bridge
         shell: pwsh
-        run: ./gradlew.bat :composeApp:buildWindowsPlayerBridge
+        run: ./gradlew.bat :composeApp:buildWindowsPlayerBridge "-Pnuvio.webview2.dir=$env:WV2_DIR"
       - uses: actions/upload-artifact@v4
         with:
           name: player_bridge
