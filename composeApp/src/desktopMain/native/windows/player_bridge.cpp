@@ -3110,7 +3110,9 @@ public:
         if (mode == 3 || mode == 4) {
             // Zoom's fill, applied to the frame once video-crop has trimmed its bars.
             setStringProperty("keepaspect", "yes");
-            setStringProperty("panscan", "1.0");
+            // Mode 3 (main player): fit what's left after the bars are trimmed, so nothing
+            // real is cut. Mode 4 (hero trailers) still fills the hero region.
+            setStringProperty("panscan", mode == 4 ? "1.0" : "0.0");
             setStringProperty("video-unscaled", "no");
             // Mode 4 is the hero trailer's: same crop, decided in about two seconds.
             autoCropQuick = mode == 4;
