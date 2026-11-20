@@ -3108,11 +3108,12 @@ public:
     void setResizeMode(int mode) {
         // Runs on the mpv call thread, which also owns the auto crop state.
         if (mode == 3 || mode == 4) {
-            // Zoom's fill, applied to the frame once video-crop has trimmed its bars.
+            // Mode 3 starts as Fit; updateAutoCropPanscan() raises panscan once video-crop has
+            // trimmed the bars, and only as far as this window needs to hide what is left of them.
+            // Mode 4 (hero trailers) always fills its region.
             setStringProperty("keepaspect", "yes");
-            // Mode 3 (main player): fit what's left after the bars are trimmed, so nothing
-            // real is cut. Mode 4 (hero trailers) still fills the hero region.
             setStringProperty("panscan", mode == 4 ? "1.0" : "0.0");
+            autoCropPanscan = mode == 4 ? 1.0 : 0.0;
             setStringProperty("video-unscaled", "no");
             // Mode 4 is the hero trailer's: same crop, decided in about two seconds.
             autoCropQuick = mode == 4;
@@ -3151,13 +3152,65 @@ public:
 
     // Event thread: queues a check once one is due. Cheap enough for every loop tick.
     void scheduleAutoCropIfDue() {
-        if (!autoCropEnabled.load() || autoCropCheckQueued.load()) return;
+        if (!autoCropEnabled.load()) return;
+        scheduleAutoCropPanscan();
+        if (autoCropCheckQueued.load()) return;
         if (std::chrono::steady_clock::now() < autoCropNextCheckAt.load()) return;
         autoCropCheckQueued = true;
         postMpvCall([this]() {
             runAutoCropCheck();
             autoCropCheckQueued = false;
         });
+    }
+
+    // Event thread: re-checks the window against the cropped picture a few times a second, so
+    // resizing the window or toggling fullscreen re-fits it without waiting for a frame grab.
+    void scheduleAutoCropPanscan() {
+        if (autoCropQuick.load() || autoCropPanscanQueued.load()) return;
+        const auto now = std::chrono::steady_clock::now();
+        if (now < autoCropPanscanNextAt.load()) return;
+        autoCropPanscanNextAt = now + std::chrono::milliseconds(250);
+        autoCropPanscanQueued = true;
+        postMpvCall([this]() {
+            updateAutoCropPanscan();
+            autoCropPanscanQueued = false;
+        });
+    }
+
+    // mpv call thread. video-crop has already removed the bars; this decides how far to zoom the
+    // cropped picture into the window.
+    //  - window at least as wide as the picture (e.g. 21:9 screen, 2:1 film): Fit. Nothing is cut
+    //    and no bar is left above or below the picture.
+    //  - window narrower than the picture (e.g. 16:9 screen, 2:1 film): Fit would leave bars
+    //    above and below, so zoom until they are gone, which trims the sides.
+    // kAutoCropMaxSideLoss caps how much width that may cost; past it the bars are only
+    // narrowed (panscan is fractional). 1.0 = always remove them.
+    void updateAutoCropPanscan() {
+        if (!autoCropEnabled.load() || autoCropQuick.load()) return;
+        double target = 0.0;
+        if (!autoCropAppliedCrop.empty()) {
+            const double frameWidth = doubleProperty("video-params/dw", 0.0);
+            const double frameHeight = doubleProperty("video-params/dh", 0.0);
+            const double windowWidth = doubleProperty("osd-width", 0.0);
+            const double windowHeight = doubleProperty("osd-height", 0.0);
+            if (frameWidth <= 0.0 || frameHeight <= 0.0 || windowWidth <= 0.0 || windowHeight <= 0.0) return;
+            const double visibleWidth = 1.0 - autoCropAppliedBars.left - autoCropAppliedBars.right;
+            const double visibleHeight = 1.0 - autoCropAppliedBars.top - autoCropAppliedBars.bottom;
+            if (visibleWidth <= 0.0 || visibleHeight <= 0.0) return;
+            const double pictureAspect = frameWidth * visibleWidth / (frameHeight * visibleHeight);
+            const double windowAspect = windowWidth / windowHeight;
+            if (windowAspect < pictureAspect * (1.0 + kAutoCropFillTolerance)) {
+                const double sideLoss = windowAspect < pictureAspect ? 1.0 - windowAspect / pictureAspect : 0.0;
+                target = sideLoss <= kAutoCropMaxSideLoss ? 1.0 : kAutoCropMaxSideLoss / sideLoss;
+            }
+        }
+        if (std::fabs(target - autoCropPanscan) < 0.005) return;
+        autoCropPanscan = target;
+        char text[32];
+        std::snprintf(text, sizeof(text), "%.3f", target);
+        setStringProperty("panscan", text);
+        nuvioMpvLogAppend(std::string("[nuvio] auto crop: panscan=") + text + " (window " +
+            std::to_string(doubleProperty("osd-width", 0.0)) + "x" + std::to_string(doubleProperty("osd-height", 0.0)) + ")\n");
     }
 
     // Event thread: a new file starts learning from scratch (video-crop is a global option, so a
@@ -4565,6 +4618,12 @@ private:
     static constexpr size_t kAutoCropQuickSamples = 4;
     static constexpr double kAutoCropQuickTolerance = 0.015;
     std::atomic_bool autoCropCheckQueued = false;
+    // How far the cropped picture is zoomed into the window (mpv panscan), see updateAutoCropPanscan.
+    static constexpr double kAutoCropMaxSideLoss = 1.0;   // max fraction of width trimmed to hide bars
+    static constexpr double kAutoCropFillTolerance = 0.03; // window this close to the picture: fill it
+    std::atomic_bool autoCropPanscanQueued = false;
+    std::atomic<std::chrono::steady_clock::time_point> autoCropPanscanNextAt{std::chrono::steady_clock::time_point{}};
+    double autoCropPanscan = 0.0; // mpv call thread
     std::atomic<std::chrono::steady_clock::time_point> autoCropNextCheckAt{std::chrono::steady_clock::time_point{}};
     std::deque<AutoCropSample> autoCropHistory;
     AutoCropBars autoCropAppliedBars;
