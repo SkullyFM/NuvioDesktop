@@ -3414,6 +3414,39 @@ public:
             " bars top/bottom " + std::to_string(bars.top * 100.0) + "% sides " +
             std::to_string(bars.left * 100.0) + "% (picture " + std::to_string(visibleAspect) + ":1)\n");
         autoCropHistory.push_back({now, bars});
+        // A logo or intro shown full frame before the film (0% bars) would otherwise stay in the
+        // history and, through the smallest-bars rule below, hold the crop at nothing for the
+        // whole film. When the latest kAutoCropStableSamples checks agree with each other on bars
+        // clearly larger than anything older, the picture has settled into a new shape: the older
+        // samples belong to something else and are forgotten. Bars shrinking (a taller picture
+        // appearing) never does this, so the protection for opening-up scenes stays. Bars are
+        // symmetric, so top/left stand for all four edges.
+        if (!autoCropVariableAspect && autoCropHistory.size() > kAutoCropStableSamples) {
+            const size_t firstRecent = autoCropHistory.size() - kAutoCropStableSamples;
+            double recentTopMin = 1.0, recentTopMax = 0.0, recentLeftMin = 1.0, recentLeftMax = 0.0;
+            double olderTopMin = 1.0, olderLeftMin = 1.0;
+            for (size_t i = 0; i < autoCropHistory.size(); ++i) {
+                const AutoCropBars &b = autoCropHistory[i].bars;
+                if (i >= firstRecent) {
+                    recentTopMin = std::min(recentTopMin, b.top);
+                    recentTopMax = std::max(recentTopMax, b.top);
+                    recentLeftMin = std::min(recentLeftMin, b.left);
+                    recentLeftMax = std::max(recentLeftMax, b.left);
+                } else {
+                    olderTopMin = std::min(olderTopMin, b.top);
+                    olderLeftMin = std::min(olderLeftMin, b.left);
+                }
+            }
+            const bool settled = recentTopMax - recentTopMin <= kAutoCropQuickTolerance &&
+                recentLeftMax - recentLeftMin <= kAutoCropQuickTolerance;
+            const bool larger = recentTopMin > olderTopMin + 0.01 || recentLeftMin > olderLeftMin + 0.01;
+            if (settled && larger) {
+                nuvioMpvLogAppend("[nuvio] auto crop: picture settled on larger bars, forgetting " +
+                    std::to_string(firstRecent) + " earlier check(s)\n");
+                autoCropHistory.erase(autoCropHistory.begin(),
+                    autoCropHistory.begin() + (std::ptrdiff_t)firstRecent);
+            }
+        }
         // Learning keeps every sample; continuous checking trusts only the last few seconds.
         if (autoCropVariableAspect) {
             while (!autoCropHistory.empty() && now - autoCropHistory.front().at > std::chrono::seconds(8)) {
@@ -3422,30 +3455,12 @@ public:
         }
         // The smallest bars seen are the safe estimate: bright pixels prove picture is there,
         // while a dark scene can only ever make bars look bigger.
-        // While learning, though, the smallest value must be backed by kAutoCropMinSupport
-        // samples: a studio logo or intro shown full frame for a couple of checks (0% bars)
-        // before a 2:1 film starts would otherwise win and lock the crop at nothing. Bars are
-        // symmetric, so top/left stand for all four edges.
         AutoCropBars smallest{1.0, 1.0, 1.0, 1.0};
-        if (!autoCropVariableAspect && autoCropHistory.size() >= kAutoCropMinSupport) {
-            std::vector<double> tops, lefts;
-            tops.reserve(autoCropHistory.size());
-            lefts.reserve(autoCropHistory.size());
-            for (const AutoCropSample &sample : autoCropHistory) {
-                tops.push_back(sample.bars.top);
-                lefts.push_back(sample.bars.left);
-            }
-            std::sort(tops.begin(), tops.end());
-            std::sort(lefts.begin(), lefts.end());
-            smallest.top = smallest.bottom = tops[kAutoCropMinSupport - 1];
-            smallest.left = smallest.right = lefts[kAutoCropMinSupport - 1];
-        } else {
-            for (const AutoCropSample &sample : autoCropHistory) {
-                smallest.top = std::min(smallest.top, sample.bars.top);
-                smallest.bottom = std::min(smallest.bottom, sample.bars.bottom);
-                smallest.left = std::min(smallest.left, sample.bars.left);
-                smallest.right = std::min(smallest.right, sample.bars.right);
-            }
+        for (const AutoCropSample &sample : autoCropHistory) {
+            smallest.top = std::min(smallest.top, sample.bars.top);
+            smallest.bottom = std::min(smallest.bottom, sample.bars.bottom);
+            smallest.left = std::min(smallest.left, sample.bars.left);
+            smallest.right = std::min(smallest.right, sample.bars.right);
         }
         bool ready = autoCropHistory.size() >= 3 &&
             now - autoCropHistory.front().at >= std::chrono::seconds(5);
@@ -4635,8 +4650,8 @@ private:
     static constexpr std::chrono::milliseconds kAutoCropQuickInterval{400};
     static constexpr size_t kAutoCropQuickSamples = 4;
     static constexpr double kAutoCropQuickTolerance = 0.015;
-    // Learning: how many samples must show bars this small (or smaller) before they count.
-    static constexpr size_t kAutoCropMinSupport = 3;
+    // Learning: this many consecutive checks agreeing on larger bars replace older, smaller ones.
+    static constexpr size_t kAutoCropStableSamples = 4;
     std::atomic_bool autoCropCheckQueued = false;
     // How far the cropped picture is zoomed into the window (mpv panscan), see updateAutoCropPanscan.
     static constexpr double kAutoCropMaxSideLoss = 1.0;   // max fraction of width trimmed to hide bars
