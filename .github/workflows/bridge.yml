@@ -1,0 +1,25 @@
+name: Build player bridge
+on:
+  workflow_dispatch:
+  push:
+    paths: ['composeApp/src/desktopMain/native/windows/player_bridge.cpp']
+
+jobs:
+  bridge:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Get WebView2 SDK
+        shell: pwsh
+        run: nuget install Microsoft.Web.WebView2 -OutputDirectory "$env:USERPROFILE\.nuget\packages\microsoft.web.webview2" -ExcludeVersion:$false
+      - name: Build bridge
+        shell: pwsh
+        run: ./gradlew.bat :composeApp:buildWindowsPlayerBridge
+      - uses: actions/upload-artifact@v4
+        with:
+          name: player_bridge
+          path: composeApp/build/native/windows/player_bridge.dll
