@@ -3208,6 +3208,11 @@ public:
             }
         }
         if (std::fabs(target - autoCropPanscan) < 0.005) return;
+        // A new video-crop only reaches the screen at the next video reconfig (~100 ms later).
+        // Lowering panscan before then shows the old, still-cropped frame un-zoomed - a flash of
+        // bars when an IMAX scene zooms out on a 16:9 screen - so it waits for the reconfig
+        // (onAutoCropVideoReconfig). Raising it early is harmless: it only zooms in sooner.
+        if (target < autoCropPanscan && std::chrono::steady_clock::now() < autoCropPanscanHoldUntil) return;
         autoCropPanscan = target;
         char text[32];
         std::snprintf(text, sizeof(text), "%.3f", target);
@@ -3242,7 +3247,13 @@ public:
     void onAutoCropVideoReconfig() {
         if (!autoCropEnabled.load()) return;
         postMpvCall([this]() {
-            if (!autoCropEnabled.load() || autoCropAppliedCrop.empty()) return;
+            if (!autoCropEnabled.load()) return;
+            // The crop just set is on screen now: panscan may follow it down (see updateAutoCropPanscan).
+            if (autoCropPanscanHoldUntil != std::chrono::steady_clock::time_point{}) {
+                autoCropPanscanHoldUntil = std::chrono::steady_clock::time_point{};
+                updateAutoCropPanscan();
+            }
+            if (autoCropAppliedCrop.empty()) return;
             const int64_t frameWidth = int64Property("video-out-params/w", 0);
             const int64_t frameHeight = int64Property("video-out-params/h", 0);
             if (frameWidth <= 0 || frameHeight <= 0) return;
@@ -3259,6 +3270,7 @@ public:
         autoCropHistory.clear();
         autoCropAppliedBars = AutoCropBars{};
         autoCropAppliedTrim = AutoCropBars{};
+        autoCropPanscanHoldUntil = std::chrono::steady_clock::time_point{};
         autoCropLearnChecks = 0;
         autoCropAttempts = 0;
         autoCropLocked = false;
@@ -3559,6 +3571,8 @@ public:
         autoCropAppliedCrop = crop;
         autoCropAppliedFrameWidth = frameWidth;
         autoCropAppliedFrameHeight = frameHeight;
+        // Until the reconfig that puts this crop on screen; the timeout covers one that never comes.
+        autoCropPanscanHoldUntil = std::chrono::steady_clock::now() + std::chrono::milliseconds(1000);
         setAutoCropProperty(crop);
         nuvioMpvLogAppend("[nuvio] auto crop: video-crop=" + (crop.empty() ? std::string("none") : crop) +
             " for bars top/bottom " + std::to_string(bars.top * 100.0) + "% sides " +
@@ -4705,6 +4719,8 @@ private:
     std::atomic_bool autoCropPanscanQueued = false;
     std::atomic<std::chrono::steady_clock::time_point> autoCropPanscanNextAt{std::chrono::steady_clock::time_point{}};
     double autoCropPanscan = 0.0; // mpv call thread
+    // mpv call thread: panscan may not go down before this (a video-crop change is in flight).
+    std::chrono::steady_clock::time_point autoCropPanscanHoldUntil{};
     std::atomic<std::chrono::steady_clock::time_point> autoCropNextCheckAt{std::chrono::steady_clock::time_point{}};
     std::deque<AutoCropSample> autoCropHistory;
     AutoCropBars autoCropAppliedBars; // the bars as measured
