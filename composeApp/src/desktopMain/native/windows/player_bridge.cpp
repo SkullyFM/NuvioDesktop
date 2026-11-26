@@ -3271,6 +3271,7 @@ public:
         autoCropAppliedBars = AutoCropBars{};
         autoCropAppliedTrim = AutoCropBars{};
         autoCropPanscanHoldUntil = std::chrono::steady_clock::time_point{};
+        autoCropTrustedShapes.clear();
         autoCropLearnChecks = 0;
         autoCropAttempts = 0;
         autoCropLocked = false;
@@ -3368,8 +3369,11 @@ public:
         // while a dark or black frame can't tighten anything.
         const bool loosenOnly = autoCropLocked && !autoCropVariableAspect;
         const bool quick = autoCropQuick.load();
+        // Variable-aspect films are checked every second, so a return to a shape already trusted
+        // (two agreeing grabs, see below) takes about two seconds.
         autoCropNextCheckAt = now + (loosenOnly ? std::chrono::milliseconds(30000)
-            : quick ? kAutoCropQuickInterval : std::chrono::milliseconds(3000));
+            : quick ? kAutoCropQuickInterval
+            : autoCropVariableAspect ? kAutoCropVariableInterval : std::chrono::milliseconds(3000));
         if (flagProperty("pause", false) || flagProperty("seeking", false)) {
             autoCropNextCheckAt = now + (quick ? kAutoCropQuickInterval : std::chrono::milliseconds(1000));
             return;
@@ -3448,7 +3452,8 @@ public:
 
         nuvioMpvLogAppend("[nuvio] auto crop: check " + std::to_string(autoCropAttempts) +
             " bars top/bottom " + std::to_string(bars.top * 100.0) + "% sides " +
-            std::to_string(bars.left * 100.0) + "% (picture " + std::to_string(visibleAspect) + ":1)\n");
+            std::to_string(bars.left * 100.0) + "% (picture " + std::to_string(visibleAspect) + ":1" +
+            (autoCropKnownShape(bars, frameAspect) ? "" : ", unusual shape") + ")\n");
         autoCropHistory.push_back({now, bars});
         // A logo or intro shown full frame before the film (0% bars) would otherwise stay in the
         // history and, through the smallest-bars rule below, hold the crop at nothing for the
@@ -3488,6 +3493,23 @@ public:
             while (!autoCropHistory.empty() && now - autoCropHistory.front().at > std::chrono::seconds(8)) {
                 autoCropHistory.pop_front();
             }
+            // Back to a shape this film has already held (the 2.39 scenes between IMAX ones):
+            // two agreeing grabs are enough to zoom back in, instead of five seconds of history.
+            // Only zooming in goes through here; zooming out is never held back anyway.
+            if (autoCropHistory.size() >= 2) {
+                const AutoCropBars &previous = autoCropHistory[autoCropHistory.size() - 2].bars;
+                for (const AutoCropBars &shape : autoCropTrustedShapes) {
+                    const bool zoomsIn = shape.top > autoCropAppliedBars.top + kAutoCropSameShape ||
+                        shape.left > autoCropAppliedBars.left + kAutoCropSameShape;
+                    if (!zoomsIn || !autoCropSameShape(bars, shape) || !autoCropSameShape(previous, shape)) continue;
+                    nuvioMpvLogAppend("[nuvio] auto crop: back to a shape seen before (picture " +
+                        std::to_string(autoCropPictureAspect(shape, frameAspect)) + ":1), zooming in\n");
+                    // Older samples (the taller scene) would otherwise pull the crop straight back out.
+                    autoCropHistory.erase(autoCropHistory.begin(), autoCropHistory.end() - 2);
+                    applyAutoCropBars(shape);
+                    return;
+                }
+            }
         }
         // The smallest bars seen are the safe estimate: bright pixels prove picture is there,
         // while a dark scene can only ever make bars look bigger.
@@ -3498,8 +3520,13 @@ public:
             smallest.left = std::min(smallest.left, sample.bars.left);
             smallest.right = std::min(smallest.right, sample.bars.right);
         }
-        bool ready = autoCropHistory.size() >= 3 &&
-            now - autoCropHistory.front().at >= std::chrono::seconds(5);
+        // A film shape (see kAutoCropKnownRatios) is trusted after three samples over five
+        // seconds; anything else is more likely a scene that happens to be dark at the edges, so
+        // it needs twice the samples over seven seconds (variable-aspect history only keeps eight).
+        const bool knownTarget = autoCropKnownShape(smallest, frameAspect);
+        bool ready = knownTarget
+            ? autoCropHistory.size() >= 3 && now - autoCropHistory.front().at >= std::chrono::seconds(5)
+            : autoCropHistory.size() >= 6 && now - autoCropHistory.front().at >= std::chrono::seconds(7);
         if (quick && !autoCropVariableAspect) {
             // Upstream's trailer rule (e22baecec): the last four samples agree to within 1.5% of
             // the frame, and the crop is the smallest of those four. A trailer is two minutes
@@ -3538,7 +3565,44 @@ public:
                 std::to_string(smallest.top * 100.0) + "% sides " + std::to_string(smallest.left * 100.0) +
                 "%, frame checks stopped\n");
         }
+        // A film shape that passed the full wait becomes one the fast path above can return to.
+        if (ready && knownTarget && (target.top > 0.0 || target.left > 0.0)) rememberAutoCropShape(target, frameAspect);
         applyAutoCropBars(target);
+    }
+
+    // Common film shapes. A picture within kAutoCropRatioTolerance of one of these, or the full
+    // frame, is a known shape; see where ready is decided in runAutoCropCheck.
+    static constexpr double kAutoCropKnownRatios[] = {
+        2.76, 2.55, 2.40, 2.35, 2.20, 2.00, 1.90, 1.85, 16.0 / 9.0, 1.66, 1.50, 1.43, 1.37, 4.0 / 3.0, 1.25,
+    };
+    static constexpr double kAutoCropRatioTolerance = 0.015;
+
+    static double autoCropPictureAspect(const AutoCropBars &bars, double frameAspect) {
+        const double height = 1.0 - bars.top - bars.bottom;
+        return height > 0.0 ? frameAspect * (1.0 - bars.left - bars.right) / height : 0.0;
+    }
+
+    static bool autoCropKnownShape(const AutoCropBars &bars, double frameAspect) {
+        if (bars.top <= 0.0 && bars.left <= 0.0) return true;
+        const double aspect = autoCropPictureAspect(bars, frameAspect);
+        for (double ratio : kAutoCropKnownRatios) {
+            if (std::fabs(aspect / ratio - 1.0) <= kAutoCropRatioTolerance) return true;
+        }
+        return false;
+    }
+
+    static bool autoCropSameShape(const AutoCropBars &a, const AutoCropBars &b) {
+        return std::fabs(a.top - b.top) <= kAutoCropSameShape && std::fabs(a.left - b.left) <= kAutoCropSameShape;
+    }
+
+    void rememberAutoCropShape(const AutoCropBars &shape, double frameAspect) {
+        for (const AutoCropBars &known : autoCropTrustedShapes) {
+            if (autoCropSameShape(known, shape)) return;
+        }
+        if (autoCropTrustedShapes.size() >= 6) autoCropTrustedShapes.erase(autoCropTrustedShapes.begin());
+        autoCropTrustedShapes.push_back(shape);
+        nuvioMpvLogAppend("[nuvio] auto crop: trusting picture " +
+            std::to_string(autoCropPictureAspect(shape, frameAspect)) + ":1 for quick returns\n");
     }
 
     // Trims the bars off the frame itself with video-crop; panscan=1 then fills the window with
@@ -4712,6 +4776,12 @@ private:
     static constexpr double kAutoCropQuickTolerance = 0.015;
     // Learning: this many consecutive checks agreeing on larger bars replace older, smaller ones.
     static constexpr size_t kAutoCropStableSamples = 4;
+    // Variable-aspect films: a grab every second, and shapes the film has already held steady
+    // (2.39 between IMAX scenes) that two agreeing grabs can zoom back into. Bars this close
+    // (fraction of the frame, ~16 rows at 2160) are the same shape.
+    static constexpr std::chrono::milliseconds kAutoCropVariableInterval{1000};
+    static constexpr double kAutoCropSameShape = 0.0075;
+    std::vector<AutoCropBars> autoCropTrustedShapes; // mpv call thread
     std::atomic_bool autoCropCheckQueued = false;
     // How far the cropped picture is zoomed into the window (mpv panscan), see updateAutoCropPanscan.
     static constexpr double kAutoCropMaxSideLoss = 1.0;   // max fraction of width trimmed to hide bars
