@@ -1008,9 +1008,10 @@ struct AutoCropBars {
 // bgr0/rgb0-style formats, 8 for rgba64). Each edge is walked inwards until a row/column has
 // more than a couple of bright samples (logos and noise are tolerated). Bars are made symmetric
 // (only what both sides agree on is trimmed) and hairlines are dropped. Returns false when the
-// frame cannot be judged, e.g. a fade to black.
+// frame cannot be judged, e.g. a fade to black. raw gets the same bars before hairlines are
+// dropped, so a strip of bar only a few rows tall can still be told from picture.
 static bool detectAutoCropBars(const uint8_t *data, int64_t width, int64_t height, int64_t stride,
-                               int bytesPerPixel, AutoCropBars &out) {
+                               int bytesPerPixel, AutoCropBars &out, AutoCropBars &raw) {
     constexpr int threshold = 16;  // 0-255; at or below counts as black
     constexpr int samples = 64;    // probes per row/column, across the middle 90% of the other axis
     constexpr int stray = 2;       // bright probes tolerated per row/column
@@ -1059,6 +1060,8 @@ static bool detectAutoCropBars(const uint8_t *data, int64_t width, int64_t heigh
 
     double vertical = std::min((double)top / height, (double)(height - bottom) / height);
     double horizontal = std::min((double)left / width, (double)(width - right) / width);
+    raw.top = raw.bottom = vertical;
+    raw.left = raw.right = horizontal;
     if (vertical < minimumBar) vertical = 0.0;
     if (horizontal < minimumBar) horizontal = 0.0;
     out.top = out.bottom = vertical;
@@ -3255,6 +3258,7 @@ public:
     void resetAutoCropState() {
         autoCropHistory.clear();
         autoCropAppliedBars = AutoCropBars{};
+        autoCropAppliedTrim = AutoCropBars{};
         autoCropLearnChecks = 0;
         autoCropAttempts = 0;
         autoCropLocked = false;
@@ -3281,7 +3285,7 @@ public:
     }
 
     // Grabs the current video frame (no OSD/subtitles, after filters) and measures its bars.
-    bool captureAutoCropBars(AutoCropBars &out, int64_t &grabWidth, int64_t &grabHeight) {
+    bool captureAutoCropBars(AutoCropBars &out, AutoCropBars &raw, int64_t &grabWidth, int64_t &grabHeight) {
         mpv_handle *handle = nullptr;
         {
             std::lock_guard<std::mutex> lock(mpvMutex);
@@ -3328,7 +3332,7 @@ public:
             : (format == "bgr0" || format == "bgra" || format == "rgb0" || format == "rgba") ? 4 : 0;
         bool judged = false;
         if (bytesPerPixel > 0) {
-            judged = detectAutoCropBars(data, width, height, stride, bytesPerPixel, out);
+            judged = detectAutoCropBars(data, width, height, stride, bytesPerPixel, out, raw);
         } else {
             nuvioMpvLogAppend("[nuvio] auto crop: unsupported screenshot format \"" + format + "\"\n");
         }
@@ -3370,10 +3374,30 @@ public:
             nuvioMpvLogAppend("[nuvio] auto crop: too few usable frames, locked as applied\n");
             return;
         }
-        AutoCropBars measured;
+        AutoCropBars measured, raw;
         int64_t grabWidth = 0, grabHeight = 0;
-        if (!captureAutoCropBars(measured, grabWidth, grabHeight)) return; // unjudgeable frame: keep whatever is applied
-        const AutoCropBars bars = autoCropBarsOfFullFrame(measured, grabWidth, grabHeight);
+        if (!captureAutoCropBars(measured, raw, grabWidth, grabHeight)) return; // unjudgeable frame: keep whatever is applied
+        bool openedUpTopBottom = false, openedUpSides = false;
+        const AutoCropBars bars = autoCropBarsOfFullFrame(measured, raw, grabWidth, grabHeight,
+            openedUpTopBottom, openedUpSides);
+        if (openedUpTopBottom || openedUpSides) {
+            // Picture has filled the strip of bar left inside the crop: the frame opened up past
+            // what is cropped (an IMAX scene), and a cropped grab can't say how far. Zoom out on
+            // that axis now; the next grab sees the whole frame and measures the new bars.
+            AutoCropBars opened = autoCropAppliedBars;
+            if (openedUpTopBottom) opened.top = opened.bottom = 0.0;
+            if (openedUpSides) opened.left = opened.right = 0.0;
+            nuvioMpvLogAppend(std::string("[nuvio] auto crop: picture opened up past the crop (") +
+                (openedUpTopBottom ? "top/bottom" : "sides") + "), zooming out to re-measure\n");
+            if (!autoCropVariableAspect) {
+                autoCropVariableAspect = true;
+                autoCropLocked = false;
+                nuvioMpvLogAppend("[nuvio] auto crop: variable aspect ratio, checking continuously\n");
+            }
+            applyAutoCropBars(opened);
+            autoCropNextCheckAt = now + std::chrono::milliseconds(500);
+            return;
+        }
         const double frameAspect = frameWidth / frameHeight;
         const double visibleWidth = 1.0 - bars.left - bars.right;
         const double visibleHeight = 1.0 - bars.top - bars.bottom;
@@ -3509,18 +3533,28 @@ public:
     // what is left, exactly as Zoom does with a frame that never had bars. Cropping (rather than
     // video-zoom) keeps the video rectangle on screen, which is what subtitles are placed in,
     // and lets mpv re-fit on window resizes by itself.
+    //
+    // screenshot-raw returns the frame after video-crop, so a crop flush with the picture would
+    // leave no way to see it open up (an IMAX scene). kAutoCropEdgeStrip of each bar is therefore
+    // left inside the crop: it is black while the bars are there, and picture appearing in it is
+    // what autoCropBarsOfFullFrame reports as opened up. panscan zooms it off screen wherever the
+    // window is at least as wide as the picture; elsewhere it is just a little more bar.
     void applyAutoCropBars(const AutoCropBars &bars) {
         const int64_t frameWidth = int64Property("video-out-params/w", int64Property("video-params/w", 0));
         const int64_t frameHeight = int64Property("video-out-params/h", int64Property("video-params/h", 0));
         if (frameWidth <= 0 || frameHeight <= 0) return;
-        const int64_t x = (int64_t)std::llround(frameWidth * bars.left);
-        const int64_t y = (int64_t)std::llround(frameHeight * bars.top);
+        AutoCropBars trim;
+        trim.top = trim.bottom = std::max(0.0, bars.top - kAutoCropEdgeStrip);
+        trim.left = trim.right = std::max(0.0, bars.left - kAutoCropEdgeStrip);
+        const int64_t x = (int64_t)std::llround(frameWidth * trim.left);
+        const int64_t y = (int64_t)std::llround(frameHeight * trim.top);
         const int64_t width = frameWidth - 2 * x;
         const int64_t height = frameHeight - 2 * y;
         if (width <= 0 || height <= 0) return;
         const std::string crop = (x == 0 && y == 0) ? std::string()
             : std::to_string(width) + "x" + std::to_string(height) + "+" + std::to_string(x) + "+" + std::to_string(y);
         autoCropAppliedBars = bars;
+        autoCropAppliedTrim = trim;
         if (crop == autoCropAppliedCrop) return;
         autoCropAppliedCrop = crop;
         autoCropAppliedFrameWidth = frameWidth;
@@ -3547,22 +3581,34 @@ public:
     // Bars measured on a grab, as fractions of the full frame. Whether screenshot-raw returns
     // the frame before or after video-crop isn't something to rely on, so it is told apart by
     // size: a grab the size of the applied crop shows only what is left, and its bars are added
-    // to the ones already trimmed.
-    AutoCropBars autoCropBarsOfFullFrame(const AutoCropBars &measured, int64_t grabWidth, int64_t grabHeight) {
+    // to the ones already trimmed. In a cropped grab the strip of bar left inside the crop (see
+    // applyAutoCropBars) is too thin to count as a bar, so it reads as no bar and maps back to the
+    // applied bars; when picture fills it instead, the axis is reported as opened up.
+    AutoCropBars autoCropBarsOfFullFrame(const AutoCropBars &measured, const AutoCropBars &raw,
+                                         int64_t grabWidth, int64_t grabHeight,
+                                         bool &openedUpTopBottom, bool &openedUpSides) {
+        openedUpTopBottom = openedUpSides = false;
         if (autoCropAppliedCrop.empty() || autoCropAppliedFrameWidth <= 0 || autoCropAppliedFrameHeight <= 0) {
             return measured;
         }
-        const double croppedWidth = autoCropAppliedFrameWidth * (1.0 - 2.0 * autoCropAppliedBars.left);
-        const double croppedHeight = autoCropAppliedFrameHeight * (1.0 - 2.0 * autoCropAppliedBars.top);
+        const AutoCropBars &trim = autoCropAppliedTrim;
+        const double croppedWidth = autoCropAppliedFrameWidth * (1.0 - 2.0 * trim.left);
+        const double croppedHeight = autoCropAppliedFrameHeight * (1.0 - 2.0 * trim.top);
         const bool grabIsCropped = std::llabs(grabWidth - (int64_t)std::llround(croppedWidth)) <= 2 &&
             std::llabs(grabHeight - (int64_t)std::llround(croppedHeight)) <= 2 &&
             (grabWidth != autoCropAppliedFrameWidth || grabHeight != autoCropAppliedFrameHeight);
         if (!grabIsCropped) return measured;
-        const double keptHeight = 1.0 - 2.0 * autoCropAppliedBars.top;
-        const double keptWidth = 1.0 - 2.0 * autoCropAppliedBars.left;
+        const double keptHeight = 1.0 - 2.0 * trim.top;
+        const double keptWidth = 1.0 - 2.0 * trim.left;
+        // Each strip is about kAutoCropEdgeStrip of the frame; under half of it still black means
+        // picture has moved into it.
+        const double stripTop = autoCropAppliedBars.top - trim.top;
+        const double stripLeft = autoCropAppliedBars.left - trim.left;
+        if (trim.top > 0.0 && raw.top * keptHeight < stripTop * 0.5) openedUpTopBottom = true;
+        if (trim.left > 0.0 && raw.left * keptWidth < stripLeft * 0.5) openedUpSides = true;
         AutoCropBars full;
-        full.top = full.bottom = autoCropAppliedBars.top + measured.top * keptHeight;
-        full.left = full.right = autoCropAppliedBars.left + measured.left * keptWidth;
+        full.top = full.bottom = trim.top + std::max(measured.top * keptHeight, stripTop);
+        full.left = full.right = trim.left + std::max(measured.left * keptWidth, stripLeft);
         return full;
     }
 
@@ -4661,7 +4707,10 @@ private:
     double autoCropPanscan = 0.0; // mpv call thread
     std::atomic<std::chrono::steady_clock::time_point> autoCropNextCheckAt{std::chrono::steady_clock::time_point{}};
     std::deque<AutoCropSample> autoCropHistory;
-    AutoCropBars autoCropAppliedBars;
+    AutoCropBars autoCropAppliedBars; // the bars as measured
+    AutoCropBars autoCropAppliedTrim; // what video-crop actually removes (bars minus the edge strip)
+    // Part of each bar left inside the crop so a cropped grab can see the picture open up.
+    static constexpr double kAutoCropEdgeStrip = 0.006;
     std::string autoCropAppliedCrop; // video-crop value, empty = none
     int64_t autoCropAppliedFrameWidth = 0;
     int64_t autoCropAppliedFrameHeight = 0;
