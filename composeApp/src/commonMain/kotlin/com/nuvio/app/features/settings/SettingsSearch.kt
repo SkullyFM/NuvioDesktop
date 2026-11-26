@@ -597,7 +597,7 @@ private fun settingsSearchEntries(
         page = SettingsPage.Usenet,
         key = "usenet",
         title = resolve(Res.string.compose_settings_page_usenet),
-        description = "Usenet · NNTP · Newznab · NZB · User-Agent · 7z",
+        description = "Usenet · NNTP · Newznab · NZB · User-Agent · 7z · Usenet info · statistics",
         icon = Icons.Rounded.Newspaper,
     )
     addPage(
@@ -1576,6 +1576,15 @@ private fun settingsSearchEntries(
     )
     addRow(
         page = SettingsPage.Streams,
+        key = "stream-usenet-formatter",
+        title = resolve(Res.string.settings_stream_usenet_formatter_title),
+        description = resolve(Res.string.settings_stream_usenet_formatter_description),
+        pageLabel = streamsPage,
+        section = resolve(Res.string.settings_stream_display_section),
+        icon = Icons.Rounded.Style,
+    )
+    addRow(
+        page = SettingsPage.Streams,
         key = "stream-size-badges",
         title = resolve(Res.string.settings_stream_size_badges_title),
         description = resolve(Res.string.settings_stream_size_badges_description),
@@ -2176,6 +2185,13 @@ private fun settingsSearchEntries(
         icon = Icons.Rounded.PlayArrow,
         rows = listOf(
             PlaybackSearchRow("auto-play-next", resolve(Res.string.settings_playback_auto_play_next_episode), resolve(Res.string.settings_playback_auto_play_next_episode_description), anchor = SettingsScrollAnchor.BingeMode),
+            // Shown only while Binge Mode is off; the fallback lands on Binge Mode, which hides it.
+            PlaybackSearchRow(
+                "skip-next-episode-countdown",
+                resolve(Res.string.settings_playback_skip_next_episode_countdown),
+                resolve(Res.string.settings_playback_skip_next_episode_countdown_description),
+                fallbackAnchor = SettingsScrollAnchor.BingeMode,
+            ),
             // Shown only while Binge Mode is on; the fallback lands on the switch that reveals it.
             PlaybackSearchRow(
                 "preload-next-episode",

@@ -24,6 +24,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.nuvio.app.core.ui.DialogButton
 import com.nuvio.app.core.ui.DialogButtonStyle
 import com.nuvio.app.core.ui.NuvioModalDialog
+import com.nuvio.app.core.ui.NuvioNumberStepper
 import com.nuvio.app.core.ui.NuvioTextField
 import com.nuvio.app.core.ui.NuvioToastController
 import com.nuvio.app.core.ui.nuvio
@@ -41,6 +42,8 @@ import com.nuvio.app.features.usenet.UsenetSettingsRepository
 import com.nuvio.app.features.usenet.UsenetSort
 import com.nuvio.app.features.usenet.UsenetSearchMode
 import com.nuvio.app.features.usenet.UsenetSourceConfiguration
+import com.nuvio.app.features.usenet.UsenetStats
+import com.nuvio.app.features.usenet.UsenetInfoFormat
 import com.nuvio.app.features.usenet.USENET_PRIORITIES
 import com.nuvio.app.features.usenet.replaceOrAdd
 import kotlinx.coroutines.CancellationException
@@ -51,7 +54,7 @@ import org.jetbrains.compose.resources.stringResource
 /*
  * Settings > Usenet: built-in Usenet (NuvioTV PR 4679), laid out as the app's other settings pages.
  * Providers and indexers are edited in the app's glass dialogs; the TV's phone set-up page, ranking
- * presets, statistics and diagnostics are not ported.
+ * presets and diagnostics are not ported. Usenet info ([UsenetInfoDialog]) is Nuvio's own.
  */
 
 private sealed interface UsenetEditor {
@@ -67,6 +70,8 @@ internal fun LazyListScope.usenetSettingsContent(isTablet: Boolean) {
         }.collectAsStateWithLifecycle()
         val indexerRevision by BuiltInUsenet.client.statusChanges.collectAsStateWithLifecycle()
         var editor by remember { mutableStateOf<UsenetEditor?>(null) }
+        var infoOpen by remember { mutableStateOf(false) }
+        val stats by UsenetStats.book.collectAsStateWithLifecycle()
         val sources = state.sources
         val engine = state.engine
         val invalidAgent = stringResource(Res.string.usenet_user_agent_invalid)
@@ -125,6 +130,13 @@ internal fun LazyListScope.usenetSettingsContent(isTablet: Boolean) {
                             },
                         )
                     }
+                    SettingsGroupDivider(isTablet = isTablet)
+                    SettingsNavigationRow(
+                        title = stringResource(Res.string.usenet_info_title),
+                        description = stringResource(Res.string.usenet_info_description),
+                        isTablet = isTablet,
+                        onClick = { infoOpen = true },
+                    )
                 }
             }
 
@@ -142,6 +154,9 @@ internal fun LazyListScope.usenetSettingsContent(isTablet: Boolean) {
                                 stringResource(Res.string.usenet_connections_count, provider.connections),
                                 stringResource(Res.string.usenet_priority_value, provider.priority),
                                 stringResource(Res.string.usenet_disabled).takeUnless { provider.enabled },
+                                stats.providers[provider.id]?.missingPercent?.let {
+                                    stringResource(Res.string.usenet_info_missing_row, UsenetInfoFormat.percent(it))
+                                },
                             ).joinToString(" · "),
                             isTablet = isTablet,
                             onClick = { editor = UsenetEditor.Provider(provider, isNew = false) },
@@ -178,6 +193,9 @@ internal fun LazyListScope.usenetSettingsContent(isTablet: Boolean) {
                                 stringResource(Res.string.usenet_priority_value, indexer.priority),
                                 status.apiHitsLeft?.let { stringResource(Res.string.usenet_hits_left, it) },
                                 stringResource(Res.string.usenet_disabled).takeUnless { indexer.enabled },
+                                stats.indexers[indexer.id]?.averageRequestMs?.let {
+                                    stringResource(Res.string.usenet_info_avg_row, UsenetInfoFormat.duration(it))
+                                },
                                 problem,
                             ).joinToString(" · "),
                             isTablet = isTablet,
@@ -283,10 +301,34 @@ internal fun LazyListScope.usenetSettingsContent(isTablet: Boolean) {
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(
                         title = stringResource(Res.string.usenet_indexer_fallback),
+                        description = stringResource(Res.string.usenet_indexer_fallback_description),
                         checked = sources.indexerFallback,
                         isTablet = isTablet,
                         onCheckedChange = { on -> save { it.copy(indexerFallback = on) } },
                     )
+                    if (sources.indexerFallback) {
+                        SettingsGroupDivider(isTablet = isTablet)
+                        UsenetFallbackScoreRow(
+                            title = stringResource(Res.string.usenet_fallback_min_score_movie),
+                            value = sources.fallbackMinScoreMovie,
+                            isTablet = isTablet,
+                            onValueChange = { v -> save { it.copy(fallbackMinScoreMovie = v) } },
+                        )
+                        SettingsGroupDivider(isTablet = isTablet)
+                        UsenetFallbackScoreRow(
+                            title = stringResource(Res.string.usenet_fallback_min_score_tv),
+                            value = sources.fallbackMinScoreTv,
+                            isTablet = isTablet,
+                            onValueChange = { v -> save { it.copy(fallbackMinScoreTv = v) } },
+                        )
+                        SettingsGroupDivider(isTablet = isTablet)
+                        UsenetFallbackScoreRow(
+                            title = stringResource(Res.string.usenet_fallback_min_score_anime),
+                            value = sources.fallbackMinScoreAnime,
+                            isTablet = isTablet,
+                            onValueChange = { v -> save { it.copy(fallbackMinScoreAnime = v) } },
+                        )
+                    }
                     SettingsGroupDivider(isTablet = isTablet)
                     SettingsSwitchRow(
                         title = stringResource(Res.string.usenet_show_release_names),
@@ -322,6 +364,8 @@ internal fun LazyListScope.usenetSettingsContent(isTablet: Boolean) {
                 }
             }
         }
+
+        if (infoOpen) UsenetInfoDialog(sources = sources, onDismiss = { infoOpen = false })
 
         when (val open = editor) {
             is UsenetEditor.Provider -> ProviderDialog(
@@ -608,6 +652,37 @@ private fun IndexerDialog(
                 onSelected = { priority = it },
             )
         }
+    }
+}
+
+@Composable
+private fun UsenetFallbackScoreRow(
+    title: String,
+    value: Int,
+    isTablet: Boolean,
+    onValueChange: (Int) -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = if (isTablet) DesktopRowVerticalPadding else 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Text(
+            text = title,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.nuvio.colors.textPrimary,
+        )
+        NuvioNumberStepper(
+            value = value.toDouble(),
+            step = 20.0,
+            min = 0.0,
+            max = 1000.0,
+            onChange = { onValueChange(it.toInt()) },
+            format = { it.toInt().toString() },
+        )
     }
 }
 

@@ -1335,6 +1335,8 @@
   <string name="settings_stream_player_badges_same">Ίδιο με τα σήματα ροών</string>
   <string name="settings_stream_addon_logo_title">Λογότυπο πρόσθετου</string>
   <string name="settings_stream_addon_logo_description">Εμφάνιση του λογοτύπου και του ονόματος του πρόσθετου δίπλα στις πηγές ροών.</string>
+  <string name="settings_stream_usenet_formatter_title">Μορφή Usenet για όλα τα αποτελέσματα</string>
+  <string name="settings_stream_usenet_formatter_description">Μορφοποίηση των ροών από πρόσθετα και debrid με τη διάταξη του ενσωματωμένου Usenet (ανάλυση, τίτλος, HDR, ομάδα κυκλοφορίας και ήχος).</string>
   <string name="settings_stream_display_section">Εμφάνιση</string>
   <string name="settings_stream_badge_position_title">Θέση σημάτων</string>
   <string name="settings_stream_badge_position_description">Επιλέξτε αν τα σήματα Fusion και μεγέθους εμφανίζονται πάνω ή κάτω από τις κάρτες ροών.</string>
@@ -1874,6 +1876,9 @@
   <string name="settings_playback_desktop_custom_mpv_options">Επιλογές MPV</string>
   <string name="settings_playback_desktop_custom_mpv_options_desc">Μία επιλογή ανά γραμμή ως key=value. Εφαρμόζονται πάνω από τις προεπιλογές του Nuvio· οι μη έγκυρες επιλογές αγνοούνται.</string>
   <string name="settings_playback_desktop_custom_mpv_options_hint">π.χ.&#10;profile=gpu-hq&#10;deband=no</string>
+  <string name="settings_playback_desktop_custom_player_css">Προσαρμοσμένο CSS αναπαραγωγής</string>
+  <string name="settings_playback_desktop_custom_player_css_desc">CSS που προστίθεται στο φύλλο στυλ των χειριστηρίων αναπαραγωγής στην επόμενη αναπαραγωγή. Χρησιμοποιήστε !important για να αντικαταστήσετε μεταβλητές θέματος.</string>
+  <string name="settings_playback_desktop_custom_player_css_hint">π.χ.&#10;:root {&#10;  --theme-accent: #ff4d8d !important;&#10;}</string>
   <string name="settings_playback_hero_tv_trailer">Αναπαραγωγή τρέιλερ στην κεφαλίδα</string>
   <string name="settings_playback_hero_tv_trailer_description">Πατήστε T για αναπαραγωγή του τρέιλερ σε αυτή τη θέση.</string>
   <string name="settings_playback_hero_tv_trailer_delay">Αναμονή πριν την αναπαραγωγή</string>
@@ -1947,6 +1952,8 @@
   <string name="settings_playback_prefetch_resolve_links">Προετοιμασία και συνδέσμων αναπαραγωγής</string>
   <string name="settings_playback_preload_next_episode">Προφόρτωση πηγών επόμενου επεισοδίου</string>
   <string name="settings_playback_preload_next_episode_description">Ξεκινά την αναζήτηση πηγών του επόμενου επεισοδίου λίγο πριν εμφανιστεί η κάρτα επόμενου επεισοδίου, ώστε η αυτόματη αναπαραγωγή να ξεκινά αμέσως</string>
+  <string name="settings_playback_skip_next_episode_countdown">Παράλειψη αντίστροφης μέτρησης επόμενου επεισοδίου</string>
+  <string name="settings_playback_skip_next_episode_countdown_description">Όταν τελειώνει ένα επεισόδιο, αναπαράγεται το επόμενο μόλις βρεθεί η πηγή του, χωρίς την αντίστροφη μέτρηση 3 δευτερολέπτων. Η λειτουργία Binge το κάνει πάντα.</string>
   <string name="settings_playback_cw_stream_cache">Διατήρηση πηγών Συνέχειας παρακολούθησης</string>
   <string name="settings_playback_cw_stream_cache_description">Θυμάται για έως και μία εβδομάδα τις πηγές που βρέθηκαν για τίτλους στη Συνέχεια παρακολούθησης, ώστε η λίστα τους να εμφανίζεται αμέσως όσο ανανεώνεται. Διατηρούνται μόνο για κυκλοφορίες τουλάχιστον 3 ημερών με 10 ή περισσότερα αποτελέσματα</string>
   <string name="settings_playback_prefetch_resolve_links_description">Επεκτείνει την Προετοιμασία συνδέσμων στις αναζητήσεις παρασκηνίου: επιλύει επίσης τον σύνδεσμο debrid του κορυφαίου αποτελέσματος, ώστε η αναπαραγωγή να ξεκινά χωρίς αναμονή του παρόχου σας</string>
@@ -5089,4 +5096,5 @@
     <string name="usenet_compressed_unplayable">Αυτή η κυκλοφορία είναι συμπιεσμένο 7z και παραλείπεται από τις ρυθμίσεις Usenet</string>
     <string name="tonight_twelve_hour">12ωρη μορφή ώρας</string>
     <string name="tonight_twelve_hour_description">Εμφάνιση ωρών ως 11:30 PM αντί για 23:30.</string>
+    <string name="player_hud_ends_at">%1$s τελειώνει στις %2$s</string>
 </resources>

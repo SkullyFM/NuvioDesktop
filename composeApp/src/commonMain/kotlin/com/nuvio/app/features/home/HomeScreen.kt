@@ -2892,6 +2892,16 @@ fun HomeScreen(
      * is the real answer, so the hero waits for it - up to the row's slide-in, after which the
      * carried card stands (the cursor was in a gap).
      */
+    /** Snap scroll's wheel step: the same wait as [awaitPointerAfterWheelRowChange], wherever the cursor is. */
+    fun holdHeroForWheelHover() {
+        heroAwaitingPointer = true
+        heroPointerWaitJob?.cancel()
+        heroPointerWaitJob = tvCoroutineScope.launch {
+            delay(HERO_WHEEL_ROW_POINTER_WAIT_MS)
+            heroAwaitingPointer = false
+        }
+    }
+
     fun awaitPointerAfterWheelRowChange() {
         if (!pointerOverImmersiveShelf) return
         heroAwaitingPointer = true
@@ -3555,7 +3565,7 @@ fun HomeScreen(
                 return items.getOrNull(focusedIndex.coerceAtMost(items.size - 1))
             }
             val sameRow = tvRows.getOrNull(tvFocusedRowIndex)?.metaItems.orEmpty()
-            val models = listOfNotNull(
+            val landingItems = listOfNotNull(
                 sameRow.getOrNull(focusedIndex + itemStep),
                 landingCard(tvFocusedRowIndex + rowStep),
                 sameRow.getOrNull(focusedIndex - itemStep),
@@ -3564,14 +3574,20 @@ fun HomeScreen(
                 val enriched = heroEnrichmentMap[canonicalHeroKey(raw.type, raw.id)]
                 val normalized = raw.withNormalizedHeroBackdrop()
                 when {
-                    enriched != null -> heroBackdropModel(enriched)
+                    enriched != null -> enriched
                     isHomeMode || normalized.hasFinalHeroBackdrop(
                         tmdbSettingsUiState.heroImageSource == HeroImageSource.TmdbMoviesTvdbShows,
-                    ) -> heroBackdropModel(normalized)
+                    ) -> normalized
                     else -> null
                 }
-            }.distinct()
+            }
+            val models = landingItems.mapNotNull(::heroBackdropModel).distinct()
             HeroBackdropPrefetcher.request(platformContext, imageLoader, models)
+            // The wash's own URL for each (what onActiveItemChanged hands it), so it can decode its
+            // blurred copy ahead too and switch with the hero instead of after it.
+            com.nuvio.app.core.ui.HeroAmbientWashPrefetch.upcoming.value = landingItems
+                .mapNotNull { it.banner ?: it.poster }
+                .distinct()
         }
     }
 
@@ -3911,6 +3927,14 @@ fun HomeScreen(
                                     change.consume()
                                     if (immersiveWheelLocked) return@onPointerEvent
                                     immersiveWheelLocked = true
+                                    // The row sliding in under the still cursor puts a card under it that need not be the
+                                    // carried one (a landscape row's 4th card sits over a portrait row's 6th-7th), and its
+                                    // hover then took focus: the hero showed the carried card and then the hovered one
+                                    // (user, Nov 23). The hovered card is the answer, as in TV mode: the hero waits for
+                                    // it, and the carried card stands only if the cursor lands in a gap.
+                                    // (Ignoring hover instead left focus on a card away from the cursor, and the card
+                                    // under it could only be picked by leaving it and coming back.)
+                                    if (mouseActivity.isMouseActive) holdHeroForWheelHover()
                                     syncTvFocusSectionToScroll()
                                     withCarriedTvItemIndex { tvFocus.moveSection(direction, tvSectionCount) }
                                     scrollToFocusedTvSection()
@@ -4074,6 +4098,7 @@ fun HomeScreen(
                     accent = activeHeroAccent,
                     onAccentChanged = { activeHeroAccent = it },
                     label = "home_hero_ambient_background",
+                    prefetchNeighbours = true,
                     modifier = Modifier.frameBudgetProbe("ambient"),
                 )
             }
@@ -4550,6 +4575,7 @@ fun HomeScreen(
                                         if (mouseActivity.isMouseActive) {
                                             tvFocus.sectionIndex = sectionIndex
                                             tvFocus.itemIndex = itemIndex
+                                            heroAwaitingPointer = false
                                         }
                                     }
                                 } else {
@@ -4583,6 +4609,7 @@ fun HomeScreen(
                                         if (mouseActivity.isMouseActive) {
                                             tvFocus.sectionIndex = sectionIndex
                                             tvFocus.itemIndex = itemIndex
+                                            heroAwaitingPointer = false
                                         }
                                     }
                                 } else {
@@ -4616,6 +4643,7 @@ fun HomeScreen(
                                         if (mouseActivity.isMouseActive) {
                                             tvFocus.sectionIndex = sectionIndex
                                             tvFocus.itemIndex = itemIndex
+                                            heroAwaitingPointer = false
                                         }
                                     }
                                 } else {
@@ -4666,6 +4694,7 @@ fun HomeScreen(
                                                 if (mouseActivity.isMouseActive) {
                                                     tvFocus.sectionIndex = sectionIndex
                                                     tvFocus.itemIndex = itemIndex
+                                                    heroAwaitingPointer = false
                                                 }
                                             }
                                         } else {
@@ -4709,6 +4738,7 @@ fun HomeScreen(
                                                 if (mouseActivity.isMouseActive) {
                                                     tvFocus.sectionIndex = sectionIndex
                                                     tvFocus.itemIndex = itemIndex
+                                                    heroAwaitingPointer = false
                                                 }
                                             }
                                         } else {
@@ -4779,6 +4809,7 @@ fun HomeScreen(
                                             if (mouseActivity.isMouseActive) {
                                                 tvFocus.sectionIndex = sectionIndex
                                                 tvFocus.itemIndex = itemIndex
+                                                heroAwaitingPointer = false
                                             }
                                         }
                                     } else {

@@ -112,9 +112,9 @@ internal expect fun usenetNzbCacheDir(): File
  * releases it, and the engine stops after a quiet half minute. Closing Nuvio closes its stdin,
  * which ends the engine too.
  *
- * Not ported from the TV: result prefetching and pre-warming, startup diagnostics and the usage
- * statistics. Provider credentials only ever travel in the session request, never in arguments,
- * files or logs.
+ * Not ported from the TV: result prefetching and pre-warming and startup diagnostics; Nuvio's
+ * own usage counts are [UsenetStats]. Provider credentials only ever travel in the session
+ * request, never in arguments, files or logs.
  */
 object UsenetEngine {
     private val log = Logger.withTag("UsenetEngine")
@@ -194,7 +194,24 @@ object UsenetEngine {
         runCatching {
             val response = http.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
             if (response.statusCode() in 200..299) json.parseToJsonElement(response.body()).jsonObject else null
-        }.getOrNull()
+        }.getOrNull()?.also { UsenetStats.sessionCounters(id, it) }
+    }
+
+    /** A closing session's last counters for Usenet info; the engine forgets them on DELETE. */
+    private suspend fun recordFinalCounters(id: String) {
+        val base = endpoint ?: return
+        val request = HttpRequest.newBuilder(URI("$base/sessions/$id/diagnostics"))
+            .timeout(Duration.ofSeconds(1))
+            .header("Authorization", "Bearer $token")
+            .GET()
+            .build()
+        runCatching {
+            val response = http.sendAsync(request, HttpResponse.BodyHandlers.ofString()).await()
+            if (response.statusCode() in 200..299) {
+                UsenetStats.sessionCounters(id, json.parseToJsonElement(response.body()).jsonObject)
+            }
+        }
+        UsenetStats.sessionClosed(id)
     }
 
     /** The performance profile the running engine was started with. */
@@ -205,11 +222,24 @@ object UsenetEngine {
         scope.launch { mutex.withLock { if (sessionId == null) stopLocked() } }
     }
 
+    /** Stops the child process immediately on application exit or OS shutdown. */
+    fun shutdown() {
+        val child = process
+        if (child != null) {
+            runCatching { child.outputStream.close() }
+            runCatching { child.destroyForcibly() }
+        }
+    }
+
     private suspend fun open(stream: StreamItem, season: Int?, episode: Int?): StreamItem {
         val sources = UsenetSettingsRepository.sources
         val configuration = UsenetSettingsRepository.engine
         val nzbUrl = requireNotNull(stream.nzbUrl) { "Not a Usenet stream" }
-        val servers = stream.usenetServers?.takeIf { it.isNotEmpty() } ?: sources.servers()
+        val addonServers = stream.usenetServers?.takeIf { it.isNotEmpty() }
+        val servers = addonServers ?: sources.servers()
+        // Usenet info names the engine's server indexes by provider; an addon's own servers are not ours.
+        val providerIds = if (addonServers != null) emptyList() else sources.providers.filter { it.enabled }.map { it.id }
+        val cachedNzb = configuration.cacheNzb && UsenetKeptNzbs.isKept(nzbUrl)
         if (servers.isEmpty()) {
             throw UsenetPreparationException("Add a Usenet provider in Settings > Usenet", UsenetPreparationException.Scope.PROVIDER)
         }
@@ -280,6 +310,7 @@ object UsenetEngine {
             sessionId = newId
             playbackUrl = url
             previousId?.let(::retireSession)
+            UsenetStats.sessionOpened(newId, providerIds)
             UsenetFailedReleases.forget(stream)
             if (result["compressed7z"]?.jsonPrimitive?.booleanOrNull == true) {
                 UsenetCompressedReleases.record(nzbUrl)
@@ -303,6 +334,7 @@ object UsenetEngine {
                 // Rows listed before this play still read ⚡: switch them to 📖 where they are.
                 if (UsenetKeptNzbs.isKept(nzbUrl)) UsenetKeptRows.mark(nzbUrl)
             }
+            UsenetStats.opened(nzbUrl, grabbed = nzbCache?.get("lookup")?.jsonPrimitive?.contentOrNull != "hit", UsenetOpenOutcome.PLAYED)
             log.i { "Opened Usenet session for \"${stream.name}\"" }
             return stream.copy(
                 url = url,
@@ -327,6 +359,22 @@ object UsenetEngine {
             }
             if (preparation?.releaseUnplayable == true) {
                 UsenetFailedReleases.record(stream, preparation.failure ?: "unplayable")
+            }
+            // The release's fault, so its indexer's; a provider or engine failure is neither.
+            // Still record missing articles / provider errors on the providers that answered, since
+            // failed opens never reach sessionOpened() and would otherwise leave providers at 0%.
+            if (preparation != null && preparation.scope == UsenetPreparationException.Scope.SOURCE) {
+                val incomplete = usenetIncompleteUpload(preparation)
+                UsenetStats.opened(
+                    nzbUrl,
+                    grabbed = !cachedNzb,
+                    outcome = if (incomplete) UsenetOpenOutcome.INCOMPLETE else UsenetOpenOutcome.FAILED,
+                )
+                if (incomplete) {
+                    UsenetStats.providerOpenFailed(providerIds, incomplete = true)
+                }
+            } else if (preparation != null && preparation.scope == UsenetPreparationException.Scope.PROVIDER) {
+                UsenetStats.providerOpenFailed(providerIds, incomplete = false)
             }
             if (preparation != null && usenetCompressedSkip(preparation)) {
                 // Kept across restarts: it is skipped again next time, without asking the engine.
@@ -358,6 +406,7 @@ object UsenetEngine {
 
     private fun retireSession(id: String) {
         scope.launch {
+            recordFinalCounters(id)
             runCatching { withTimeoutOrNull(2_000L) { control("/sessions/$id", null, delete = true) } }
         }
     }
@@ -367,6 +416,7 @@ object UsenetEngine {
         sessionId = null
         playbackUrl = null
         if (id != null) {
+            recordFinalCounters(id)
             val answer = runCatching { withTimeoutOrNull(2_000L) { control("/sessions/$id", null, delete = true) } }.getOrNull()
             if (answer == null) { stopLocked(); return }
         }
@@ -461,6 +511,7 @@ object UsenetEngine {
     private fun stopLocked() {
         idleStop?.cancel(); idleStop = null
         val child = process
+        sessionId?.let(UsenetStats::sessionClosed)
         process = null; processProfile = null; endpoint = null; token = null; sessionId = null; playbackUrl = null
         if (child != null) {
             runCatching { child.outputStream.close() }

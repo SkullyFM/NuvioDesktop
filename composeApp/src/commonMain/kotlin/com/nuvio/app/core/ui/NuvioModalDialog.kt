@@ -1,5 +1,8 @@
 package com.nuvio.app.core.ui
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -19,11 +22,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shape
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
@@ -44,8 +50,20 @@ fun NuvioDialogSurface(
     content: @Composable () -> Unit,
 ) {
     val colors = MaterialTheme.nuvio.colors
+    val entrance = remember { Animatable(0f) }
+    LaunchedEffect(Unit) {
+        UiMotion.markBusy(150L)
+        entrance.animateTo(1f, tween(durationMillis = 150, easing = FastOutSlowInEasing))
+    }
     Surface(
         modifier = modifier
+            .graphicsLayer {
+                val p = entrance.value
+                alpha = p
+                val s = 0.96f + 0.04f * p
+                scaleX = s
+                scaleY = s
+            }
             .shadow(elevation = 32.dp, shape = shape, clip = false)
             // A dark top-to-bottom ramp rather than one flat fill. An earlier attempt at this was
             // reverted for banding — a ~5% sheen crosses too few 8-bit levels to look continuous —
@@ -97,7 +115,13 @@ fun NuvioModalDialog(
     ) {
         KeyRouteLayer("dialog", menu = false)
         // A screen of its own for the focus router (KeyLayers): focus lost inside it comes back to its last control.
-        NuvioDialogSurface(modifier = modifier.widthIn(max = maxWidth).keyLayer("Dialog"), shape = shape) {
+        NuvioDialogSurface(
+            modifier = modifier
+                .padding(horizontal = 24.dp, vertical = 20.dp)
+                .widthIn(max = maxWidth)
+                .keyLayer("Dialog"),
+            shape = shape,
+        ) {
           Column {
             Column(
                 modifier = Modifier.fillMaxWidth().padding(start = 24.dp, end = 24.dp, top = 22.dp, bottom = 16.dp),
@@ -123,6 +147,7 @@ fun NuvioModalDialog(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .weight(1f, fill = false)
                     .heightIn(max = 620.dp)
                     .padding(horizontal = 24.dp, vertical = 18.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp),
@@ -167,7 +192,13 @@ fun NuvioAlertDialog(
     ) {
         KeyRouteLayer("alert dialog", menu = false)
         // A screen of its own for the focus router (KeyLayers): focus lost inside it comes back to its last control.
-        NuvioDialogSurface(modifier = modifier.widthIn(max = maxWidth).keyLayer("Dialog"), shape = shape) {
+        NuvioDialogSurface(
+            modifier = modifier
+                .padding(horizontal = 24.dp, vertical = 20.dp)
+                .widthIn(max = maxWidth)
+                .keyLayer("Dialog"),
+            shape = shape,
+        ) {
             // A dialog is its own window: the arrows (and a pad's D-pad) move between its controls and buttons, which
             // desktop Compose leaves to Tab otherwise.
             Column(Modifier.arrowKeyFocusNavigation()) {
@@ -185,6 +216,7 @@ fun NuvioAlertDialog(
                     Column(
                         modifier = Modifier
                             .fillMaxWidth()
+                            .weight(1f, fill = false)
                             .heightIn(max = 560.dp)
                             .padding(horizontal = 24.dp, vertical = 18.dp),
                     ) {
